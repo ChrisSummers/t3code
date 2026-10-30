@@ -1,7 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
 import { EnvironmentNotRegisteredError } from "@t3tools/client-runtime/connection";
 import { isTransportConnectionErrorMessage } from "@t3tools/client-runtime/errors";
-import { EnvironmentRpcUnavailableError } from "@t3tools/client-runtime/rpc";
+import {
+  EnvironmentRpcConnectionLostError,
+  EnvironmentRpcUnavailableError,
+} from "@t3tools/client-runtime/rpc";
 import {
   CommandId,
   ComposerContextId,
@@ -1313,6 +1316,15 @@ describe("thread outbox", () => {
         new EnvironmentRpcUnavailableError({
           environmentId: "environment-1",
           message: "Home is not connected.",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      shouldRetryThreadOutboxDelivery(
+        new EnvironmentRpcConnectionLostError({
+          environmentId: "environment-1",
+          method: "orchestration.dispatchCommand",
+          message: "Lost the connection to Home before it answered.",
         }),
       ),
     ).toBe(true);

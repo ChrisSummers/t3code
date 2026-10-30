@@ -256,7 +256,29 @@ function FoldedMessageHeader(props: {
 }
 
 function UserMessageProjectedStatus({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+  const ctx = use(TimelineRowCtx);
   const status = row.projectedItem?.item.status;
+  if (ctx.unconfirmedMessageIds.has(row.message.id)) {
+    const { onRetryUnconfirmedMessage, onDiscardUnconfirmedMessage } = ctx;
+    return (
+      <div className="me-1 flex items-center gap-2 text-xs">
+        <span className="rounded-full border border-destructive/25 bg-destructive/8 px-1.5 py-0.5 text-3xs font-medium text-destructive">
+          Not confirmed
+        </span>
+        <span className="text-muted-foreground">Connection lost before the server answered.</span>
+        {onRetryUnconfirmedMessage ? (
+          <InlineButton onClick={() => onRetryUnconfirmedMessage(row.message.id)}>
+            Retry
+          </InlineButton>
+        ) : null}
+        {onDiscardUnconfirmedMessage ? (
+          <InlineButton tone="muted" onClick={() => onDiscardUnconfirmedMessage(row.message.id)}>
+            Discard
+          </InlineButton>
+        ) : null}
+      </div>
+    );
+  }
   if (
     status === undefined ||
     status === "completed" ||

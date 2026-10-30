@@ -1,6 +1,9 @@
 import {
+  CommandId,
   EnvironmentId,
+  ORCHESTRATION_V2_WS_METHODS,
   type RelayClientInstallProgressEvent,
+  ThreadId,
   type ServerLifecycleStreamEvent,
   WS_METHODS,
 } from "@t3tools/contracts";
@@ -16,6 +19,8 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { RpcClientError } from "effect/rpc";
+import * as Socket from "effect/socket/Socket";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   AVAILABLE_CONNECTION_STATE,
@@ -26,7 +31,13 @@ import {
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
-import { runStream, subscribe, subscribeDynamicWithSession } from "./client.ts";
+import {
+  type EnvironmentRpcInput,
+  request,
+  runStream,
+  subscribe,
+  subscribeDynamicWithSession,
+} from "./client.ts";
 
 const TARGET = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -344,6 +355,202 @@ describe("environment RPC", () => {
       expect(yield* Ref.get(retryCount)).toBe(0);
     }),
   );
+
+  describe("a connection lost mid-request", () => {
+    const COMMAND = {
+      type: "thread.archive",
+      commandId: CommandId.make("command-1"),
+      threadId: ThreadId.make("thread-1"),
+    } as unknown as EnvironmentRpcInput<typeof ORCHESTRATION_V2_WS_METHODS.dispatchCommand>;
+    const socketDropped = new RpcClientError.RpcClientError({
+      reason: new Socket.SocketReadError({ cause: new Error("socket closed") }),
+    });
+
+    // One server's receipt store, reached through any number of sessions.
+    const makeServer = () => {
+      const receipts = new Map<string, { readonly sequence: number }>();
+      const received: Array<{ readonly commandId: string }> = [];
+      const dispatch = (command: { readonly commandId: string }) => {
+        received.push(command);
+        const existing = receipts.get(command.commandId);
+        if (existing !== undefined) return existing;
+        const receipt = { sequence: 7 + receipts.size };
+        receipts.set(command.commandId, receipt);
+        return receipt;
+      };
+      return { receipts, received, dispatch };
+    };
+
+    it.effect("resends a dispatch on the next session and resolves with its original receipt", () =>
+      Effect.gen(function* () {
+        const server = makeServer();
+        const firstSent = yield* Deferred.make<void>();
+        const firstClient = {
+          [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: {
+            readonly commandId: string;
+          }) =>
+            Effect.sync(() => server.dispatch(command)).pipe(
+              Effect.andThen(Deferred.succeed(firstSent, undefined)),
+              // The server committed, then the socket dropped before the ack arrived.
+              Effect.andThen(Effect.fail(socketDropped)),
+            ),
+        } as unknown as WsRpcProtocolClient;
+        const secondClient = {
+          [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: {
+            readonly commandId: string;
+          }) => Effect.sync(() => server.dispatch(command)),
+        } as unknown as WsRpcProtocolClient;
+        const { activeSession, supervisor } = yield* makeHarness();
+
+        yield* SubscriptionRef.set(activeSession, Option.some(session(firstClient)));
+        const resultFiber = yield* request(
+          ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+          COMMAND,
+        ).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(firstSent);
+        yield* SubscriptionRef.set(activeSession, Option.none());
+        yield* SubscriptionRef.set(activeSession, Option.some(session(secondClient)));
+
+        expect(yield* Fiber.join(resultFiber)).toEqual({ sequence: 7 });
+        expect(server.received.map((command) => command.commandId)).toEqual([
+          "command-1",
+          "command-1",
+        ]);
+        expect(server.receipts.size).toBe(1);
+      }),
+    );
+
+    it.effect("fails a dispatch with ConnectionLost once no session returns within the bound", () =>
+      Effect.gen(function* () {
+        const firstSent = yield* Deferred.make<void>();
+        const client = {
+          [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: () =>
+            Deferred.succeed(firstSent, undefined).pipe(Effect.andThen(Effect.fail(socketDropped))),
+        } as unknown as WsRpcProtocolClient;
+        const { activeSession, supervisor } = yield* makeHarness();
+
+        yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+        const resultFiber = yield* request(
+          ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+          COMMAND,
+        ).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.flip,
+          Effect.forkChild,
+        );
+        yield* Deferred.await(firstSent);
+        yield* SubscriptionRef.set(activeSession, Option.none());
+        yield* TestClock.adjust("30 seconds");
+
+        const error = yield* Fiber.join(resultFiber);
+        expect(error._tag).toBe("EnvironmentRpcConnectionLostError");
+      }),
+    );
+
+    it.effect("fails a resend that the next session never answers once the bound passes", () =>
+      Effect.gen(function* () {
+        const firstSent = yield* Deferred.make<void>();
+        const resent = yield* Deferred.make<void>();
+        const firstClient = {
+          [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: () =>
+            Deferred.succeed(firstSent, undefined).pipe(Effect.andThen(Effect.fail(socketDropped))),
+        } as unknown as WsRpcProtocolClient;
+        const silentClient = {
+          [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: () =>
+            Deferred.succeed(resent, undefined).pipe(Effect.andThen(Effect.never)),
+        } as unknown as WsRpcProtocolClient;
+        const { activeSession, supervisor } = yield* makeHarness();
+
+        yield* SubscriptionRef.set(activeSession, Option.some(session(firstClient)));
+        const resultFiber = yield* request(
+          ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+          COMMAND,
+        ).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.flip,
+          Effect.forkChild,
+        );
+        yield* Deferred.await(firstSent);
+        yield* SubscriptionRef.set(activeSession, Option.some(session(silentClient)));
+        yield* Deferred.await(resent);
+        yield* TestClock.adjust("30 seconds");
+
+        const error = yield* Fiber.join(resultFiber);
+        expect(error._tag).toBe("EnvironmentRpcConnectionLostError");
+      }),
+    );
+
+    it.effect("fails other requests with ConnectionLost when the session is torn down", () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const sent = yield* Deferred.make<void>();
+        const teardown = yield* Deferred.make<never>();
+        const client = {
+          [ORCHESTRATION_V2_WS_METHODS.getThreadProjection]: () =>
+            Effect.sync(() => {
+              calls += 1;
+            }).pipe(
+              Effect.andThen(Deferred.succeed(sent, undefined)),
+              Effect.andThen(Deferred.await(teardown)),
+            ),
+        } as unknown as WsRpcProtocolClient;
+        const { activeSession, supervisor } = yield* makeHarness();
+
+        yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+        const resultFiber = yield* request(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, {
+          threadId: ThreadId.make("thread-1"),
+        }).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.flip,
+          Effect.forkChild,
+        );
+        yield* Deferred.await(sent);
+        // The RPC client resumes pending requests with an interrupt when its scope closes.
+        yield* Deferred.interrupt(teardown);
+        yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+
+        const error = yield* Fiber.join(resultFiber);
+        expect(error._tag).toBe("EnvironmentRpcConnectionLostError");
+        expect(calls).toBe(1);
+      }),
+    );
+
+    it.effect("leaves a dispatch the caller interrupts interrupted", () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const sent = yield* Deferred.make<void>();
+        const client = {
+          [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: () =>
+            Effect.sync(() => {
+              calls += 1;
+            }).pipe(
+              Effect.andThen(Deferred.succeed(sent, undefined)),
+              Effect.andThen(Effect.never),
+            ),
+        } as unknown as WsRpcProtocolClient;
+        const { activeSession, supervisor } = yield* makeHarness();
+
+        yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+        const resultFiber = yield* request(
+          ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+          COMMAND,
+        ).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(sent);
+        yield* Fiber.interrupt(resultFiber);
+        const exit = yield* Fiber.await(resultFiber);
+        yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+
+        expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true);
+        expect(calls).toBe(1);
+      }),
+    );
+  });
 
   it.effect.each(["input", "stream"] as const)(
     "does not classify %s subscription defects as expected failures",

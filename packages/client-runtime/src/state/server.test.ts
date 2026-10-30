@@ -33,6 +33,7 @@ import {
 } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as Persistence from "../platform/persistence.ts";
+import { EnvironmentRpcConnectionLostError } from "../rpc/client.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import {
@@ -476,6 +477,17 @@ describe("server state projection", () => {
         Cause.fail(
           new RpcClientError.RpcClientError({
             reason: new Socket.SocketCloseError({ code: 1006 }),
+          }),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isLegacyUpdateHandoffLoss(
+        Cause.fail(
+          new EnvironmentRpcConnectionLostError({
+            environmentId: "environment-1",
+            method: WS_METHODS.serverUpdateServer,
+            message: "Lost the connection.",
           }),
         ),
       ),

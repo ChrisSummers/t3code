@@ -20,13 +20,22 @@ import {
   AuthOrchestrationOperateScope,
   DEFAULT_MODEL,
   type EnvironmentId,
+  type MessageId,
   type ModelSelection,
   type PreviewAnnotationPayload,
   type ThreadId,
   ProviderInteractionMode,
   RuntimeMode,
 } from "@t3tools/contracts";
-import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
+import {
+  deriveThreadTitleSeed,
+  type StartThreadTurnInput,
+} from "@t3tools/client-runtime/operations";
+import {
+  EnvironmentRpcConnectionLostError,
+  EnvironmentRpcUnavailableError,
+} from "@t3tools/client-runtime/rpc";
+import * as Schema from "effect/Schema";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import {
   declinePendingApprovals,
@@ -43,7 +52,7 @@ import {
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import { createModelSelection } from "@t3tools/shared/model";
-import { type SetStateAction, useLayoutEffect, useRef } from "react";
+import { type SetStateAction, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -60,7 +69,7 @@ import {
 import { resolvePlanFollowUpSubmission } from "../../proposedPlan";
 import { type ChatMessage } from "../../types";
 import { stackedThreadToast, toastManager } from "../ui/toast";
-import { newMessageId, newThreadId } from "~/lib/utils";
+import { newCommandId, newMessageId, newThreadId } from "~/lib/utils";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import {
@@ -143,6 +152,9 @@ import type { useWorktreeSetup } from "./useWorktreeSetup";
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 
 const selectPlanModeEnabled = (settings: UnifiedSettings) => settings.planModeEnabled;
+
+const isConnectionLost = Schema.is(EnvironmentRpcConnectionLostError);
+const isUnavailable = Schema.is(EnvironmentRpcUnavailableError);
 
 function readEnvironmentPresentation(environmentId: EnvironmentId) {
   return appAtomRegistry.get(environmentPresentations.presentationsAtom).get(environmentId);
@@ -372,6 +384,12 @@ export function useComposerSend(input: ComposerSendInput) {
     anchorNewTurn,
     persistThreadSettingsForNextTurn,
   });
+  const [unconfirmedSends, setUnconfirmedSends] = useState<
+    ReadonlyMap<
+      MessageId,
+      { readonly environmentId: EnvironmentId; readonly input: StartThreadTurnInput }
+    >
+  >(new Map());
   const { sendInFlight: sendInFlightRef } = draftSendState(routeThreadKey);
   const composerSendGenerationRef = useRef(0);
   const environmentUnavailableSendToastSlotRef = useRef(0);
@@ -817,6 +835,7 @@ export function useComposerSend(input: ComposerSendInput) {
       composerAttachmentsSnapshot.map((attachment) => attachment.id),
     );
     const messageIdForSend = newMessageId();
+    const commandIdForSend = newCommandId();
     const messageCreatedAt = new Date().toISOString();
     const outgoingMessageText = formatOutgoingPrompt({
       provider: ctxSelectedProvider,
@@ -1218,6 +1237,7 @@ export function useComposerSend(input: ComposerSendInput) {
 
     let backgroundDraftOpened = false;
     let turnStartSucceeded = false;
+    let unconfirmedStart: StartThreadTurnInput | null = null;
     if (failure === null && turnAttachmentsResult._tag === "Success") {
       const bootstrap =
         isLocalDraftThread || baseBranchForWorktree
@@ -1253,35 +1273,34 @@ export function useComposerSend(input: ComposerSendInput) {
           ? scopeThreadRef(environmentId, threadIdForSend)
           : null;
       if (backgroundThreadRef) beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
-      const startPromise = startThreadTurn({
-        environmentId,
-        input: {
-          threadId: threadIdForSend,
-          message: {
-            messageId: messageIdForSend,
-            role: "user",
-            attachments: turnAttachmentsResult.value,
-            ...withMessageContext({
-              text: outgoingMessageText,
-              context: buildOutgoingMessageContext(
-                boundAttachmentIds(turnAttachmentsResult.value, composerAttachmentsSnapshot),
-              ),
-              // Read at dispatch time: the upload and persistence awaits above can
-              // span a server reconnect that changes it.
-              supportsInlineMessageContext:
-                appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment
-                  .capabilities.inlineMessageContext === true,
-            }),
-          },
-          modelSelection: ctxSelectedModelSelection,
-          titleSeed: title,
-          runtimeMode,
-          interactionMode: sendInteractionMode,
-          dispatchMode: turnDispatchMode,
-          ...(bootstrap ? { bootstrap } : {}),
-          createdAt: messageCreatedAt,
+      const startInput: StartThreadTurnInput = {
+        commandId: commandIdForSend,
+        threadId: threadIdForSend,
+        message: {
+          messageId: messageIdForSend,
+          role: "user",
+          attachments: turnAttachmentsResult.value,
+          ...withMessageContext({
+            text: outgoingMessageText,
+            context: buildOutgoingMessageContext(
+              boundAttachmentIds(turnAttachmentsResult.value, composerAttachmentsSnapshot),
+            ),
+            // Read at dispatch time: the upload and persistence awaits above can
+            // span a server reconnect that changes it.
+            supportsInlineMessageContext:
+              appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment
+                .capabilities.inlineMessageContext === true,
+          }),
         },
-      });
+        modelSelection: ctxSelectedModelSelection,
+        titleSeed: title,
+        runtimeMode,
+        interactionMode: sendInteractionMode,
+        dispatchMode: turnDispatchMode,
+        ...(bootstrap ? { bootstrap } : {}),
+        createdAt: messageCreatedAt,
+      };
+      const startPromise = startThreadTurn({ environmentId, input: startInput });
       if (backgroundThreadRef) {
         try {
           backgroundDraftOpened = Boolean(
@@ -1308,6 +1327,10 @@ export function useComposerSend(input: ComposerSendInput) {
       const startResult = await startPromise;
       if (startResult._tag === "Failure") {
         failure = startResult;
+        // Thread launches keep the restore path, which reuses the thread id so a resend cannot fork it.
+        if (bootstrap === undefined && isConnectionLost(squashAtomCommandFailure(startResult))) {
+          unconfirmedStart = startInput;
+        }
       } else {
         turnStartSucceeded = true;
         setKeepFullHistory(routeThreadKey, false);
@@ -1352,7 +1375,12 @@ export function useComposerSend(input: ComposerSendInput) {
       }
     }
 
-    if (failure !== null) {
+    if (unconfirmedStart !== null) {
+      const retryInput = unconfirmedStart;
+      setUnconfirmedSends((current) =>
+        new Map(current).set(messageIdForSend, { environmentId, input: retryInput }),
+      );
+    } else if (failure !== null) {
       if (isLocalDraftThread && draftId && draftThread) {
         restoreFailedDraftThread(
           draftId,
@@ -1428,5 +1456,52 @@ export function useComposerSend(input: ComposerSendInput) {
     }
   };
 
-  return { onSend };
+  const forgetUnconfirmedSend = (messageId: MessageId) =>
+    setUnconfirmedSends((current) => {
+      if (!current.has(messageId)) return current;
+      const next = new Map(current);
+      next.delete(messageId);
+      return next;
+    });
+  const removeOptimisticMessage = (messageId: MessageId) =>
+    setOptimisticUserMessages((existing) => {
+      for (const message of existing) {
+        if (message.id === messageId) revokeUserMessagePreviewUrls(message);
+      }
+      const next = existing.filter((message) => message.id !== messageId);
+      return next.length === existing.length ? existing : next;
+    });
+
+  // The retry reuses the original commandId, so a send the server already applied returns its receipt.
+  const retryUnconfirmedSend = async (messageId: MessageId) => {
+    const pending = unconfirmedSends.get(messageId);
+    if (pending === undefined) return;
+    forgetUnconfirmedSend(messageId);
+    const result = await startThreadTurn(pending);
+    if (result._tag === "Success") return;
+    const error = squashAtomCommandFailure(result);
+    // Only a server rejection settles the original send; anything else may still have applied.
+    if (isConnectionLost(error) || isUnavailable(error) || isAtomCommandInterrupted(result)) {
+      setUnconfirmedSends((current) => new Map(current).set(messageId, pending));
+      return;
+    }
+    removeOptimisticMessage(messageId);
+    setThreadError(
+      pending.input.threadId,
+      error instanceof Error ? error.message : "Failed to send message.",
+    );
+  };
+  const discardUnconfirmedSend = (messageId: MessageId) => {
+    forgetUnconfirmedSend(messageId);
+    removeOptimisticMessage(messageId);
+  };
+
+  const unconfirmedMessageIds: ReadonlySet<MessageId> = new Set(unconfirmedSends.keys());
+
+  return {
+    onSend,
+    unconfirmedMessageIds,
+    retryUnconfirmedSend,
+    discardUnconfirmedSend,
+  };
 }

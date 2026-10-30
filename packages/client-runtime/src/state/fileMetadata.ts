@@ -21,6 +21,7 @@ import type { EnvironmentRegistry } from "../connection/registry.ts";
 import {
   request,
   type EnvironmentRpcFailure,
+  EnvironmentRpcConnectionLostError,
   EnvironmentRpcUnavailableError,
 } from "../rpc/client.ts";
 import type { RpcSession } from "../rpc/session.ts";
@@ -49,7 +50,9 @@ class FileMetadataRequest extends Request.Class<
     retained?: RetainedMetadata;
   },
   FilesystemEntryMetadata | null,
-  EnvironmentRpcFailure<typeof WS_METHODS.filesystemGetMetadata> | EnvironmentRpcUnavailableError
+  | EnvironmentRpcFailure<typeof WS_METHODS.filesystemGetMetadata>
+  | EnvironmentRpcUnavailableError
+  | EnvironmentRpcConnectionLostError
 > {}
 
 export function createFileMetadataAtoms<R, E>(

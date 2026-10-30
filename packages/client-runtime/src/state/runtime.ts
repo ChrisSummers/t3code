@@ -27,6 +27,7 @@ import {
   type EnvironmentRpcStreamValue,
   type EnvironmentSubscriptionRpcTag,
   type EnvironmentUnaryRpcTag,
+  EnvironmentRpcConnectionLostError,
   EnvironmentRpcUnavailableError,
   request,
   requestGuarded,
@@ -783,7 +784,9 @@ export function createEnvironmentRpcQueryAtomFamily<
       emit: (value: EnvironmentRpcSuccess<TTag>) => Effect.Effect<void>,
     ) => Effect.Effect<
       EnvironmentRpcSuccess<TTag>,
-      EnvironmentRpcFailure<TTag> | EnvironmentRpcUnavailableError,
+      | EnvironmentRpcFailure<TTag>
+      | EnvironmentRpcUnavailableError
+      | EnvironmentRpcConnectionLostError,
       EnvironmentSupervisor.EnvironmentSupervisor | EnvironmentRegistry.EnvironmentRegistry
     >;
     readonly persistence?: QueryPersistence<EnvironmentRpcSuccess<TTag>>;
@@ -872,7 +875,9 @@ export function createEnvironmentRpcCommand<
       input: Input,
     ) => Effect.Effect<
       EnvironmentRpcSuccess<TTag>,
-      EnvironmentRpcFailure<TTag> | EnvironmentRpcUnavailableError,
+      | EnvironmentRpcFailure<TTag>
+      | EnvironmentRpcUnavailableError
+      | EnvironmentRpcConnectionLostError,
       EnvironmentSupervisor.EnvironmentSupervisor | EnvironmentRegistry.EnvironmentRegistry
     >;
     readonly scheduler?: AtomCommandScheduler;

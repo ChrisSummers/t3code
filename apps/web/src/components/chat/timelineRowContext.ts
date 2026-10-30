@@ -85,6 +85,10 @@ export interface TimelineRowSharedState {
   onCancelWorktreeSetup: (() => void) | null;
   retryableWorkspacePreparationRunIds: ReadonlySet<RunId>;
   onRetryWorkspacePreparation: ((runId: RunId) => void) | null;
+  /** Sends whose connection dropped before the server answered, so they may or may not have applied. */
+  unconfirmedMessageIds: ReadonlySet<MessageId>;
+  onRetryUnconfirmedMessage: ((messageId: MessageId) => void) | null;
+  onDiscardUnconfirmedMessage: ((messageId: MessageId) => void) | null;
   onWorktreeSetupWorkLocally: (() => void) | null;
   onOpenWorktreeSetupTerminal: ((terminalId: string) => void) | null;
   workGroupViewState: WorkGroupViewState;
