@@ -278,7 +278,7 @@ function CodexArtifactTemplateCard(props: {
       role="group"
       aria-label={`${props.template.displayName} template`}
       data-chat-markdown-artifact-template
-      className="my-[0.65rem] flex w-full min-w-0 items-center gap-3 rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-foreground shadow-xs"
+      className="mt-(--typeset-flow) flex w-full min-w-0 items-center gap-3 rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-foreground shadow-xs"
       data-artifact-kind={props.template.artifactKind}
       data-markdown-copy={`${props.template.displayName} (${presentationLabel})\n\n`}
       data-skill-name={props.template.skillName}
@@ -971,7 +971,10 @@ const CHAT_MARKDOWN_COMPONENTS = {
       <div
         role="note"
         dir={props.dir}
-        className={cn("my-1 border-s-2 ps-3", alert.borderClassName)}
+        className={cn(
+          "chat-markdown-alert mt-(--typeset-flow) border-s-2 ps-3",
+          alert.borderClassName,
+        )}
       >
         <p
           data-thread-find-ignore="true"
@@ -1628,7 +1631,7 @@ function ChatMarkdown({
       className={cn(
         "chat-markdown w-full min-w-0 [overflow-wrap:anywhere] [word-break:break-word]",
         !inline &&
-          "text-sm leading-relaxed text-foreground/[calc(90%+var(--appearance-contrast-boost)/10)]",
+          "text-sm leading-(--typeset-leading) text-foreground/[calc(90%+var(--appearance-contrast-boost)/10)]",
         className,
       )}
       data-streaming={componentState.isStreaming ? "" : undefined}
