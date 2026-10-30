@@ -21,7 +21,7 @@ export const MarkdownMath = memo(function MarkdownMath(props: {
     <span
       className={
         props.display
-          ? "chat-markdown-math-display my-[0.65rem] block in-[.chat-markdown-table-container]:max-w-none in-[.chat-markdown-table-container]:overflow-visible"
+          ? "chat-markdown-math-display mt-(--typeset-flow) block in-[.chat-markdown-table-container]:max-w-none in-[.chat-markdown-table-container]:overflow-visible"
           : "inline-block max-w-full align-middle whitespace-nowrap wrap-normal break-normal in-[.chat-markdown-table-container]:max-w-none in-[.chat-markdown-table-container]:overflow-visible"
       }
       data-markdown-math={props.display ? "display" : "inline"}

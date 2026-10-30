@@ -34,7 +34,7 @@ export function MarkdownDetails({
   const content = childNodes.filter((_, index) => index !== summaryIndex);
 
   return (
-    <div className="my-2 border-y border-border/60">
+    <div className="mt-(--typeset-flow) border-y border-border/60">
       <Collapsible
         open={expanded}
         onOpenChange={setIsOpen}
