@@ -43,6 +43,7 @@ import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import * as Persistence from "../platform/persistence.ts";
 import { runCachePersistence } from "./cachePersistence.ts";
 import {
+  EnvironmentRpcConnectionLostError,
   isRpcClientError,
   request,
   requestGuarded,
@@ -310,7 +311,10 @@ export function serverUpdateFailureMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Server update failed.";
 }
 
+const isConnectionLost = Schema.is(EnvironmentRpcConnectionLostError);
+
 function isRpcSocketError(error: unknown): boolean {
+  if (isConnectionLost(error)) return true;
   if (!isRpcClientError(error)) {
     return false;
   }

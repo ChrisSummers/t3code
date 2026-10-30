@@ -8,14 +8,18 @@ import {
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { RpcClientError } from "effect/rpc";
+import * as Socket from "effect/socket/Socket";
 
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
@@ -25,6 +29,16 @@ export class EnvironmentRpcUnavailableError extends Schema.TaggedError<Environme
   "EnvironmentRpcUnavailableError",
   {
     environmentId: Schema.String,
+    message: Schema.String,
+  },
+) {}
+
+/** The connection dropped after the request was sent, so the server may or may not have applied it. */
+export class EnvironmentRpcConnectionLostError extends Schema.TaggedError<EnvironmentRpcConnectionLostError>()(
+  "EnvironmentRpcConnectionLostError",
+  {
+    environmentId: Schema.String,
+    method: Schema.String,
     message: Schema.String,
   },
 ) {}
@@ -188,6 +202,59 @@ const authorizeRequest = Effect.fn("EnvironmentRpc.authorize")(function* (
   yield* guard.authorize(supervisor.target.environmentId, method, input);
 });
 
+// The server's command receipts make a repeated commandId return the original
+// receipt, so these are safe to send again with the same payload.
+const RESEND_AFTER_RECONNECT: ReadonlySet<string> = new Set([
+  ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+  ORCHESTRATION_V2_WS_METHODS.launchThread,
+]);
+const RESEND_WINDOW_MS = 30_000;
+
+const isSocketErrorReason = Schema.is(Socket.SocketErrorReason);
+
+function isConnectionLoss<E>(cause: Cause.Cause<E>): boolean {
+  // Session teardown resumes pending requests with an interrupt from its own fiber.
+  if (Cause.hasInterruptsOnly(cause)) return true;
+  return (
+    cause.reasons.length > 0 &&
+    cause.reasons.every(
+      (reason) =>
+        Cause.isFailReason(reason) &&
+        isRpcClientError(reason.error) &&
+        isSocketErrorReason(reason.error.reason) &&
+        reason.error.reason._tag !== "SocketOpenError",
+    )
+  );
+}
+
+function sendOnSession<TTag extends EnvironmentUnaryRpcTag>(
+  session: RpcSession,
+  tag: TTag,
+  input: EnvironmentRpcInput<TTag>,
+  lost: EnvironmentRpcConnectionLostError,
+): Effect.Effect<
+  EnvironmentRpcSuccess<TTag>,
+  EnvironmentRpcFailure<TTag> | EnvironmentRpcConnectionLostError
+> {
+  const method = session.client[tag] as (
+    input: EnvironmentRpcInput<TTag>,
+  ) => Effect.Effect<EnvironmentRpcSuccess<TTag>, EnvironmentRpcFailure<TTag>>;
+  return method(input).pipe(Effect.catchCauseIf(isConnectionLoss, () => Effect.fail(lost)));
+}
+
+const nextSession = (
+  supervisor: EnvironmentSupervisor.EnvironmentSupervisor["Service"],
+  lostSession: RpcSession,
+) =>
+  SubscriptionRef.changes(supervisor.session).pipe(
+    Stream.filterMap((session) =>
+      Option.isSome(session) && session.value !== lostSession
+        ? Result.succeed(session.value)
+        : Result.failVoid,
+    ),
+    Stream.runHead,
+  );
+
 export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
   TTag extends EnvironmentUnaryRpcTag,
 >(tag: TTag, input: EnvironmentRpcInput<TTag>) {
@@ -196,18 +263,43 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
     "environment.id": supervisor.target.environmentId,
     "rpc.method": tag,
   });
-  const session = yield* currentSession();
+  const firstSession = yield* currentSession();
   yield* authorizeRequest(tag, input);
   const observer = yield* EnvironmentRpcRequestObserver;
-  const method = session.client[tag] as (
-    input: EnvironmentRpcInput<TTag>,
-  ) => Effect.Effect<EnvironmentRpcSuccess<TTag>, EnvironmentRpcFailure<TTag>>;
   const completeObservation = yield* observer.observe({
     environmentId: supervisor.target.environmentId,
     environmentLabel: supervisor.target.label,
     method: tag,
   });
-  return yield* method(input).pipe(Effect.ensuring(completeObservation));
+  const lost = new EnvironmentRpcConnectionLostError({
+    environmentId: supervisor.target.environmentId,
+    method: tag,
+    message: `Lost the connection to ${supervisor.target.label} before it answered. The request may or may not have been applied.`,
+  });
+  if (!RESEND_AFTER_RECONNECT.has(tag)) {
+    return yield* sendOnSession(firstSession, tag, input, lost).pipe(
+      Effect.ensuring(completeObservation),
+    );
+  }
+  return yield* Effect.gen(function* () {
+    const resendUntil = (yield* Clock.currentTimeMillis) + RESEND_WINDOW_MS;
+    let session = firstSession;
+    for (;;) {
+      const exit = yield* sendOnSession(session, tag, input, lost).pipe(Effect.exit);
+      if (Exit.isSuccess(exit)) return exit.value;
+      const wasLost =
+        exit.cause.reasons.length > 0 &&
+        exit.cause.reasons.every((reason) => Cause.isFailReason(reason) && reason.error === lost);
+      if (!wasLost) return yield* Effect.failCause(exit.cause);
+      const remainingMs = Math.max(0, resendUntil - (yield* Clock.currentTimeMillis));
+      const next = yield* nextSession(supervisor, session).pipe(
+        Effect.timeoutOption(Duration.millis(remainingMs)),
+        Effect.map(Option.flatten),
+      );
+      if (Option.isNone(next)) return yield* lost;
+      session = next.value;
+    }
+  }).pipe(Effect.ensuring(completeObservation));
 });
 
 export function runStreamGuarded<TTag extends EnvironmentStreamCommandRpcTag>(

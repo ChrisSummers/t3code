@@ -262,6 +262,7 @@ export function shouldRetryThreadOutboxDelivery(error: unknown): boolean {
       case "ConnectionTransientError":
       case "RpcClientError":
       case "EnvironmentRpcUnavailableError":
+      case "EnvironmentRpcConnectionLostError":
       case "EnvironmentNotRegisteredError":
         return true;
       default:
