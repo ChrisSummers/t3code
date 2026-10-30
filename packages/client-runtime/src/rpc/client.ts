@@ -285,7 +285,19 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
     const resendUntil = (yield* Clock.currentTimeMillis) + RESEND_WINDOW_MS;
     let session = firstSession;
     for (;;) {
-      const exit = yield* sendOnSession(session, tag, input, lost).pipe(Effect.exit);
+      const send = sendOnSession(session, tag, input, lost);
+      const exit = yield* (
+        session === firstSession
+          ? send
+          : send.pipe(
+              Effect.timeoutOrElse({
+                duration: Duration.millis(
+                  Math.max(0, resendUntil - (yield* Clock.currentTimeMillis)),
+                ),
+                orElse: () => Effect.fail(lost),
+              }),
+            )
+      ).pipe(Effect.exit);
       if (Exit.isSuccess(exit)) return exit.value;
       const wasLost =
         exit.cause.reasons.length > 0 &&

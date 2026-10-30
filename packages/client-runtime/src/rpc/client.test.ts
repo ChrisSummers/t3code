@@ -450,6 +450,39 @@ describe("environment RPC", () => {
       }),
     );
 
+    it.effect("fails a resend that the next session never answers once the bound passes", () =>
+      Effect.gen(function* () {
+        const firstSent = yield* Deferred.make<void>();
+        const resent = yield* Deferred.make<void>();
+        const firstClient = {
+          [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: () =>
+            Deferred.succeed(firstSent, undefined).pipe(Effect.andThen(Effect.fail(socketDropped))),
+        } as unknown as WsRpcProtocolClient;
+        const silentClient = {
+          [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: () =>
+            Deferred.succeed(resent, undefined).pipe(Effect.andThen(Effect.never)),
+        } as unknown as WsRpcProtocolClient;
+        const { activeSession, supervisor } = yield* makeHarness();
+
+        yield* SubscriptionRef.set(activeSession, Option.some(session(firstClient)));
+        const resultFiber = yield* request(
+          ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+          COMMAND,
+        ).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.flip,
+          Effect.forkChild,
+        );
+        yield* Deferred.await(firstSent);
+        yield* SubscriptionRef.set(activeSession, Option.some(session(silentClient)));
+        yield* Deferred.await(resent);
+        yield* TestClock.adjust("30 seconds");
+
+        const error = yield* Fiber.join(resultFiber);
+        expect(error._tag).toBe("EnvironmentRpcConnectionLostError");
+      }),
+    );
+
     it.effect("fails other requests with ConnectionLost when the session is torn down", () =>
       Effect.gen(function* () {
         let calls = 0;

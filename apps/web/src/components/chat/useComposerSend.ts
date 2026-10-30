@@ -31,7 +31,10 @@ import {
   deriveThreadTitleSeed,
   type StartThreadTurnInput,
 } from "@t3tools/client-runtime/operations";
-import { EnvironmentRpcConnectionLostError } from "@t3tools/client-runtime/rpc";
+import {
+  EnvironmentRpcConnectionLostError,
+  EnvironmentRpcUnavailableError,
+} from "@t3tools/client-runtime/rpc";
 import * as Schema from "effect/Schema";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import {
@@ -151,6 +154,7 @@ const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 const selectPlanModeEnabled = (settings: UnifiedSettings) => settings.planModeEnabled;
 
 const isConnectionLost = Schema.is(EnvironmentRpcConnectionLostError);
+const isUnavailable = Schema.is(EnvironmentRpcUnavailableError);
 
 function readEnvironmentPresentation(environmentId: EnvironmentId) {
   return appAtomRegistry.get(environmentPresentations.presentationsAtom).get(environmentId);
@@ -1476,17 +1480,16 @@ export function useComposerSend(input: ComposerSendInput) {
     const result = await startThreadTurn(pending);
     if (result._tag === "Success") return;
     const error = squashAtomCommandFailure(result);
-    if (isConnectionLost(error)) {
+    // Only a server rejection settles the original send; anything else may still have applied.
+    if (isConnectionLost(error) || isUnavailable(error) || isAtomCommandInterrupted(result)) {
       setUnconfirmedSends((current) => new Map(current).set(messageId, pending));
       return;
     }
     removeOptimisticMessage(messageId);
-    if (!isAtomCommandInterrupted(result)) {
-      setThreadError(
-        pending.input.threadId,
-        error instanceof Error ? error.message : "Failed to send message.",
-      );
-    }
+    setThreadError(
+      pending.input.threadId,
+      error instanceof Error ? error.message : "Failed to send message.",
+    );
   };
   const discardUnconfirmedSend = (messageId: MessageId) => {
     forgetUnconfirmedSend(messageId);
