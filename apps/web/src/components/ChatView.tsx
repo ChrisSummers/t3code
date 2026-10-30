@@ -2865,6 +2865,10 @@ export default function ChatView(props: ChatViewProps) {
     void retryUnconfirmedSend(messageId);
   });
   const onDiscardUnconfirmedMessageStable = useStableCallback(discardUnconfirmedSend);
+  // A send the server applied after its connection dropped arrives as the server's own row.
+  const pendingUnconfirmedMessageIds: ReadonlySet<MessageId> = new Set(
+    [...unconfirmedMessageIds].filter((id) => !serverAcknowledgedUserMessageIds.has(id)),
+  );
   const onImplementPlanInNewThreadStable = useStableCallback(onImplementPlanInNewThread);
 
   const onWorktreeSetupWorkLocally = () => {
@@ -3260,7 +3264,7 @@ export default function ChatView(props: ChatViewProps) {
                   : {
                       retryableWorkspacePreparationRunIds,
                       onRetryWorkspacePreparation: onRetryWorkspacePreparationStable,
-                      unconfirmedMessageIds,
+                      unconfirmedMessageIds: pendingUnconfirmedMessageIds,
                       onRetryUnconfirmedMessage: onRetryUnconfirmedMessageStable,
                       onDiscardUnconfirmedMessage: onDiscardUnconfirmedMessageStable,
                     })}
